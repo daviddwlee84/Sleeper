@@ -1,0 +1,15 @@
+user|I'm seeing a panic in {{.File}} when {{.Func}} is called concurrently. Any ideas?
+ai|Let me take a look. The pattern usually means a shared map without a mutex, or a closed channel send. Can you paste the trace?
+user|"goroutine 41 [running]: ... {{.File}}:{{.Line}} +0x80"
+ai|That's a nil map write. {{.Func}} is allocating lazily but there's no `sync.Once`. I'd switch to constructing the map at struct init, or guard with `sync.Mutex`.
+user|Mutex feels heavier than needed.
+ai|Then lift the allocation. Move the `m = make(map...)` call into the constructor. {{.Func}} stays read-only and the race goes away.
+user|Trying that now.
+ai|Once it's green, add a `go test -race` step to CI so we catch the next one. This kind of bug is invisible without `-race`.
+---
+user|`{{.Func}}` returns wrong values when input slice is empty. Repro?
+ai|Looks like an off-by-one. The loop probably runs from 0 to len-1 but you index `result[i+1]` somewhere. Mind sharing the body?
+user|Yeah it's `for i := range items { result[i+1] = items[i] }`.
+ai|There it is. When items is empty the slice stays untouched, but when it has 1 element you write to index 1 of a 1-len slice — panic. Initialize `result` with `len(items)+1` or change the index expression.
+user|Initializing larger fixed it.
+ai|Add a table-driven test with empty / single / many cases so the regression doesn't sneak back in.

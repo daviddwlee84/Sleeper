@@ -1,0 +1,15 @@
+user|{{.Func}} in {{.File}} is 200 lines. Want to break it up but not sure where to cut.
+ai|Find the natural seams: blocks separated by blank lines, or by where local state stops being touched. Each seam is a candidate for extraction.
+user|There's a big validation block at the top.
+ai|Pull that out first into `validate{{.Func}}Input` — pure function, takes the request, returns error or normalized struct. Keeps the main flow on the happy path.
+user|Done. Now the meat is two big switch arms.
+ai|Each switch arm probably wants its own function. Name them by what they do, not by the case label. The switch then becomes a one-liner dispatcher.
+user|Tests still passing.
+ai|Good. Don't merge yet — run a quick coverage check on the new helpers, and make sure the refactor didn't drop a code path. If coverage dipped on the helpers, that's the gap.
+---
+user|Two packages duplicate the same {{.Func}} logic. Worth deduping?
+ai|Depends on whether they'll evolve together. If both will always do the same thing, share. If they happen to look the same today but model different domains, keep them separate.
+user|They're both validating user input but with subtly different rules.
+ai|That's the trap — looks duplicated, isn't. If you share now, the next change will start adding flags to differentiate, and you end up with worse code than two clean copies.
+user|Leaving them then. Anything to tidy?
+ai|Add a comment in {{.File}} pointing at the sibling, so the next reader doesn't waste time rediscovering the divergence. That documents the intentional choice.

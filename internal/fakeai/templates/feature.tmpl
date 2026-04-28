@@ -1,0 +1,15 @@
+user|Want to add pagination to the {{.Func}} endpoint. What's the cleanest shape?
+ai|Two common patterns: cursor-based (opaque token) or offset+limit. Cursor scales but is harder to reason about; offset is fine if you don't need stability across writes.
+user|Reads heavily outnumber writes here. Offset is OK.
+ai|Then add `limit` (default 25, max 100) and `offset` (default 0) query params. Validate, then thread them down into {{.File}}'s repository call.
+user|Should I cap the response size too?
+ai|Yes — set a hard ceiling on `limit` server-side regardless of what the client asks. Otherwise a 50k limit will hose you.
+user|Anything to watch for in the SQL?
+ai|If your ORDER BY isn't on an indexed column, large offsets get expensive. Add an index on the sort key, and document the perf cliff in {{.File}}.
+---
+user|Adding a `--dry-run` flag to {{.Func}}. Where should the check live?
+ai|Push it as far down as possible — right before the side effect. That way the surrounding logic stays identical and you can't forget to honor it.
+user|So inside the writer, not in the orchestrator?
+ai|Right. The orchestrator passes a context value or a flag through; the writer guards the actual `Write`/`Exec`. Log "would do X" instead of doing it.
+user|How about tests?
+ai|Add a fake writer that records calls. With dry-run on, your existing assertions about "what would happen" stay green and the recorder shows the same intent.
