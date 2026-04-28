@@ -210,3 +210,148 @@ type RedrawMsg struct{}                              // callback 發出讓 scene
 **安全自審**：
 - grep `os.Create|os.WriteFile|ioutil.WriteFile` 確認沒有任何寫入路徑（fake-vim 永遠不存檔）
 - grep `sh -c|/bin/sh` 確認沒有 shell 拼接
+
+---
+
+# Round 2 — Bug Fixes (2026-04-28)
+
+## Context
+
+兩個顯眼問題：
+1. **Top border 經常被擠掉** — fakevim 進入 INSERT 模式後，pane 頂端的 `╭───╮` 邊框消失；vim+shell 兩 pane 都受影響。
+2. **隨機編輯把代碼插在原本正常代碼中間，formatting 完全壞掉** — 例如 `package log.Printf("debug: %+v\n", v)return fmt.Errorf("foo: %w", err)main` 出現在螢幕上。看就知道是假的。
+
+使用者問是否要用 LSP 解決位置問題。**結論：不用**。LSP 需要為每個語言類型 spawn 一個 language server (gopls/pylsp/...)，處理 async response 的生命週期，啟動成本和維護負擔對「假裝編輯」這個玩具完全不划算。Heuristic + 「永遠在行尾換行後插入」就能拿到 90% 的逼真度。
+
+另外使用者要求把先前 RAM 爆炸相關的 bug 記錄到 `pitfalls/`，當作將來避坑用。
+
+## Root cause 分析
+
+### Bug 1 — Top border eaten
+`internal/fakevim/model.go` 的 `truncatePlain` 用 `len(s)`（byte count）截斷每行內容到 `bodyW`：
+```go
+func truncatePlain(s string, w int) string {
+    if len(s) > w { return s[:w] }
+    ...
+}
+```
+但 Go 檔案用 **TAB** 縮排。一個 `\t` byte 在大多數 terminal 顯示為 8 格（或 lipgloss 視為 1 格 — 不一致）。所以一行 byte 長 60、實際顯示 100 格的內容被「截斷到 60 byte」後，丟給 chroma，再丟給 lipgloss，lipgloss 用 `cellbuf.Wrap(str, width-padding, "")` 偵測到視覺寬度超出，**自動換行**。每個被換的 row 多 1 行，`scene.paneStyle.Height(h-2)` 是 **minimum** 不是 max — 內容超量就直接撐高 pane，最終整個 view 比 terminal 還高，top border 被推出視野。
+
+### Bug 2 — Insertion 破壞 formatting
+`fakevim.stepNormal` 在隨機 row、隨機 col 直接進 INSERT 模式打多行 phrase（`"if err != nil {\n\treturn err\n}"`）。這樣會：
+- 把現有的 `import (` 中間插入新代碼
+- 把多行 phrase 一個一個字打進去，混入其他現有 token，產生視覺垃圾
+- 完全沒有縮排匹配
+
+## 修復方案
+
+### Fix 1 — Tab expansion + hard cap on pane size
+
+**File**: `internal/fakevim/model.go`
+
+1. 加 `expandTabs(s string, tabSize int) string` helper：把 `\t` 換成空格直到下一個 `tabSize` 倍數欄位（**精確的 tab stop**，不是 naive 4-space replace）。
+2. 在 View 的非 cursor 行：
+   ```go
+   ln := expandTabs(m.lines[row], 4)
+   b.WriteString(highlightLine(m.file.Lang, truncatePlain(ln, bodyW)))
+   ```
+3. cursor 行（`renderCursorLine`）：傳入展開過的 line，cursor col 用 byte 不變但 visible 對齊。
+4. status line 的 `gap` 計算用 `lipgloss.Width()` 已經是對的；確認沒有溢位。
+
+**File**: `internal/scene/scene.go`
+
+5. `paneStyle` 加 `MaxWidth(w)` 和 `MaxHeight(h)`（外框 hard cap），防止任何子 model 的失誤把 pane 撐大：
+   ```go
+   return lipgloss.NewStyle().
+       Border(lipgloss.RoundedBorder()).
+       BorderForeground(...).
+       Padding(0, 1).
+       Width(w-2).Height(h-2).
+       MaxWidth(w).MaxHeight(h)
+   ```
+
+### Fix 2 — Insert 用 vim `o` 模式 + indent 匹配
+
+**File**: `internal/fakevim/model.go`
+
+1. 重寫 `stepNormal` 的 case `roll < 90`：
+   - **Pick a "safe row"**：從 cursor 附近找一個「結尾乾淨」的 row（line 結尾是 `}`, `)`, `;`, 空行，或符合 `^\s*$`）。Fallback 到任意 row。
+   - **跳到該 row 的行尾**（cursorCol = len(line)）
+   - 進 INSERT mode，但 `insertBuf` 的內容變成：`"\n" + indent + singleLinePhrase`
+2. `pickInsertPhrase` 改成只回 **單行** phrase（拆掉現有 `"if err != nil {\n\treturn err\n}"` 等多行 entry，改成 `"_ = handleErr(err)"`、`"// TODO: revisit"` 之類不破結構的 statement）。
+3. 加 `detectIndent(lines []string, row int) string` — 從 row 往上找第一個非空白行，回傳它的 leading whitespace。新插入的行用一樣的縮排。
+4. 把 cursor mid-line random insert 路徑（`roll < 90`）完全替換掉。原本 `roll < 60` 的「在 line 內隨機跳 col」也應該收斂，否則 cursor 會停在 token 中間看起來怪。
+
+新分布：
+```
+roll <  20: row 跳動（cursor 上下移）
+roll <  40: 在 line 內 word-wise 跳（不在 token 中間）
+roll <  85: open 新行 + 縮排 + 單行 phrase（`o` 模式）
+roll < 100: 思考停頓
+```
+
+新的 single-line `insertBank`：
+```go
+"go": {
+    "_ = ctx.Err()",
+    "// TODO: revisit boundary case",
+    "log.Printf(\"trace: %+v\", payload)",
+    "return fmt.Errorf(\"wrap: %w\", err)",
+    "metrics.Inc(\"events.processed\")",
+},
+"python": {
+    "logger.debug(\"trace=%s\", payload)",
+    "# TODO: revisit boundary case",
+    "raise ValueError(\"unexpected state\")",
+},
+"typescript": {
+    "logger.debug({ payload });",
+    "// TODO: revisit boundary case",
+},
+"_default": {
+    "// TODO",
+    "// fixme: revisit",
+},
+```
+
+### Fix 3 — Pitfalls knowledge base (separate task)
+
+使用者要求把先前的 RAM 爆炸 bug 記錄起來。建立 `pitfalls/` 目錄，每個 pitfall 一個 .md，依「症狀 / 原因 / 偵測 / 修法」結構：
+- `pitfalls/urandom-readfile-oom.md` — `os.ReadFile("/dev/urandom")` 無限分配
+- `pitfalls/caffeinate-u-flag-silent-exit.md` — `-u` 沒搭 `-t` 預設 5s 退出
+- `pitfalls/lipgloss-truecolor-double-styling.md` — termenv 自動偵測 + chroma 重複塗色
+- `pitfalls/bubbletea-quit-deadlock.md` — `prog.Quit()` 不保證即時返回，需 hard-fallback deadline
+- `pitfalls/fakevim-tab-truncation.md` — byte-len 截斷 vs cell-width，tab 是地雷
+
+也加 `TODO.md` 索引記錄已知限制（例如 LSP 不做、未來可考慮 tree-sitter）。`backlog/` 暫不建（沒有大的 design 待決定）。
+
+這個任務獨立於 Bug 1/2，可以並行做。
+
+## Critical files
+
+- `internal/fakevim/model.go` — 改 View 的 tab 展開、改 stepNormal 的插入邏輯、改 pickInsertPhrase / insertBank
+- `internal/scene/scene.go` — paneStyle 加 MaxWidth/MaxHeight
+- `pitfalls/*.md`（new） + `TODO.md`（new）
+
+## Verification
+
+**手動**：
+```bash
+go install ./cmd/sleeper
+sleeper --project ~/work/some-go-repo  # 任何含 tabs 的 Go 項目
+```
+- 持續看 5 分鐘，top border 應該永遠在
+- 進 INSERT mode 後新代碼應該出現在「新的下一行」，縮排對齊
+- 切 layout (`Tab`) 各種組合都不破
+
+**自動**：
+- 加 `internal/fakevim/expand_tabs_test.go` — table-test `expandTabs` 各種輸入
+- 加 `internal/fakevim/insert_test.go` — 驗證 `detectIndent` 與「永遠不在 mid-line 插入」的 invariant
+
+**煙霧**：
+- `python3 /tmp/sleeper-pty.py 10` 跑 10 秒，RSS 應穩定 < 30MB（已經是了）
+
+**Pitfalls**：
+- `ls pitfalls/` 應該有 5 個檔
+- 每個檔開頭有 symptom / cause / detect / fix 段落
+

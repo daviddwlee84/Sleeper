@@ -75,7 +75,14 @@ func (m *Model) loadFile(f scanner.File) {
 	} else if len(lines) == 0 {
 		m.lines = []string{""}
 	} else {
-		m.lines = lines
+		// Expand tabs ONCE on load so every later width / cursor calculation
+		// can use byte length == cell width. Mixing tabs with byte-truncation
+		// causes lipgloss to wrap wide lines, which overflows pane height
+		// and pushes the top border off-screen.
+		m.lines = make([]string, len(lines))
+		for i, ln := range lines {
+			m.lines[i] = expandTabs(ln, 4)
+		}
 	}
 	m.cursorRow = m.rng.IntN(len(m.lines))
 	m.cursorCol = 0
@@ -155,25 +162,112 @@ func (m *Model) stepNormal() (time.Duration, tea.Cmd) {
 	}
 	roll := m.rng.IntN(100)
 	switch {
-	case roll < 30: // jump to a new line within range
+	case roll < 20: // jump to a new line within a small window
 		m.cursorRow = clamp(m.cursorRow+m.rng.IntN(11)-5, 0, len(m.lines)-1)
 		m.cursorCol = clampCol(m.lines, m.cursorRow, m.cursorCol)
 		m.adjustScroll()
 		return jitter(m.rng, 80, 220), nil
-	case roll < 60: // move within the line
-		ln := m.lines[m.cursorRow]
-		if len(ln) > 0 {
-			m.cursorCol = m.rng.IntN(len(ln) + 1)
-		}
+	case roll < 40: // move within the line, but jump to a word boundary, not mid-token
+		m.cursorCol = pickWordBoundary(m.lines[m.cursorRow], m.rng)
 		return jitter(m.rng, 60, 180), nil
-	case roll < 90: // enter insert mode and type a small phrase
+	case roll < 85: // simulate vim 'o' command: open new line below + type
+		row := pickSafeRow(m.lines, m.cursorRow, m.rng)
+		m.cursorRow = row
+		m.cursorCol = len(m.lines[row]) // jump to EOL
+		m.adjustScroll()
+		indent := detectIndent(m.lines, row)
+		phrase := pickInsertPhrase(m.rng, m.file)
 		m.state = stateInsert
-		m.insertBuf = []rune(pickInsertPhrase(m.rng, m.file))
+		// Newline first (the 'o' part), then the indent, then the statement.
+		m.insertBuf = []rune("\n" + indent + phrase)
 		return jitter(m.rng, 200, 450), nil
 	default: // longer pause "thinking"
 		m.pausedTill = time.Now().Add(time.Duration(800+m.rng.IntN(1200)) * time.Millisecond)
 		return 200 * time.Millisecond, nil
 	}
+}
+
+// pickSafeRow finds a row near the cursor that ends "cleanly" (with `}`, `)`,
+// `;`, or is blank). Falls back to the cursor row if no clean row is found in
+// the search window. This avoids inserting code mid-statement.
+func pickSafeRow(lines []string, around int, rng *rand.Rand) int {
+	if len(lines) == 0 {
+		return 0
+	}
+	const window = 8
+	lo := around - window
+	if lo < 0 {
+		lo = 0
+	}
+	hi := around + window
+	if hi >= len(lines) {
+		hi = len(lines) - 1
+	}
+	cands := safeRowScratch[:0]
+	for i := lo; i <= hi; i++ {
+		if isCleanEnd(lines[i]) {
+			cands = append(cands, i)
+		}
+	}
+	safeRowScratch = cands
+	if len(cands) == 0 {
+		return clamp(around, 0, len(lines)-1)
+	}
+	return cands[rng.IntN(len(cands))]
+}
+
+// safeRowScratch is a package-level scratch slice reused by pickSafeRow to
+// avoid per-call allocation. fakevim runs in a single goroutine so this is
+// safe.
+var safeRowScratch []int
+
+func isCleanEnd(s string) bool {
+	t := strings.TrimRight(s, " \t")
+	if t == "" {
+		return true
+	}
+	switch t[len(t)-1] {
+	case '}', ')', ';', ',':
+		return true
+	}
+	return false
+}
+
+// detectIndent returns the leading whitespace of the nearest non-blank line at
+// or above row. Used so newly-inserted statements line up with the surrounding
+// block instead of starting at column 0.
+func detectIndent(lines []string, row int) string {
+	for i := row; i >= 0; i-- {
+		ln := lines[i]
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		end := 0
+		for end < len(ln) && (ln[end] == ' ' || ln[end] == '\t') {
+			end++
+		}
+		return ln[:end]
+	}
+	return ""
+}
+
+// pickWordBoundary returns a column at the start of a word (after whitespace)
+// or at end-of-line. Avoids stopping the cursor mid-identifier where an
+// insertion would corrupt a token visually.
+func pickWordBoundary(line string, rng *rand.Rand) int {
+	if line == "" {
+		return 0
+	}
+	starts := []int{0, len(line)}
+	prev := byte(' ')
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if (prev == ' ' || prev == '\t') && c != ' ' && c != '\t' {
+			starts = append(starts, i)
+		}
+		prev = c
+	}
+	return starts[rng.IntN(len(starts))]
 }
 
 func (m *Model) stepInsert() (time.Duration, tea.Cmd) {
@@ -399,6 +493,36 @@ func truncatePlain(s string, w int) string {
 	return s
 }
 
+// expandTabs replaces each '\t' with the number of spaces needed to reach the
+// next column that is a multiple of tabSize. This is the standard tab-stop
+// behavior of every text editor / terminal. Without this, our byte-based
+// width calculations are wrong for any source file using tabs (i.e. all Go
+// code) and lipgloss word-wraps mid-line, which overflows pane height.
+func expandTabs(s string, tabSize int) string {
+	if tabSize <= 0 {
+		tabSize = 4
+	}
+	if !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	col := 0
+	for _, r := range s {
+		if r == '\t' {
+			n := tabSize - (col % tabSize)
+			for i := 0; i < n; i++ {
+				b.WriteByte(' ')
+			}
+			col += n
+			continue
+		}
+		b.WriteRune(r)
+		col++
+	}
+	return b.String()
+}
+
 func renderCursorLine(line string, col, width int, insert bool) string {
 	if col > len(line) {
 		col = len(line)
@@ -440,28 +564,42 @@ func pickInsertPhrase(r *rand.Rand, f scanner.File) string {
 	return bank[r.IntN(len(bank))]
 }
 
+// Phrases here MUST be single-line. Multi-line phrases corrupt the file's
+// structure visually because we insert at end-of-line via vim's `o` command,
+// which only opens ONE new line.
 var insertBank = map[string][]string{
 	"go": {
-		"if err != nil {\n\treturn err\n}",
-		"// TODO: handle edge case",
-		"ctx, cancel := context.WithTimeout(ctx, 2*time.Second)\ndefer cancel()",
-		"log.Printf(\"debug: %+v\\n\", v)",
-		"return fmt.Errorf(\"foo: %w\", err)",
+		"_ = ctx.Err()",
+		"// TODO: revisit boundary case",
+		"log.Printf(\"trace: %+v\", payload)",
+		"return fmt.Errorf(\"wrap: %w\", err)",
+		"metrics.Inc(\"events.processed\")",
+		"defer cancel()",
 	},
 	"python": {
-		"if not result:\n    raise ValueError(\"empty\")",
-		"# TODO: refactor this branch",
-		"logger.debug(\"value=%s\", value)",
-		"with open(path, \"r\") as fh:\n    data = fh.read()",
+		"logger.debug(\"trace=%s\", payload)",
+		"# TODO: revisit boundary case",
+		"raise ValueError(\"unexpected state\")",
+		"return None",
 	},
 	"typescript": {
-		"if (!data) throw new Error('missing');",
-		"// TODO: tighten the type",
-		"const next = await fetchNext(id);",
+		"logger.debug({ payload });",
+		"// TODO: revisit boundary case",
+		"return null;",
+	},
+	"javascript": {
+		"console.debug({ payload });",
+		"// TODO: revisit boundary case",
+		"return null;",
+	},
+	"rust": {
+		"// TODO: revisit boundary case",
+		"tracing::debug!(?payload);",
+		"return Err(anyhow::anyhow!(\"unexpected\"));",
 	},
 	"_default": {
 		"// TODO",
-		"// fixme",
-		"// note: review this later",
+		"// fixme: revisit",
+		"// note: needs review",
 	},
 }

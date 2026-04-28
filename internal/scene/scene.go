@@ -251,12 +251,19 @@ func paneStyle(w, h int, label string) lipgloss.Style {
 	case "ai":
 		color = "213"
 	}
+	// Width/Height set the inner block dims (lipgloss adds padding + border on
+	// top). MaxWidth/MaxHeight enforce a hard cap: even if a child renders too
+	// much content, the pane never grows beyond (w, h). Without the cap, an
+	// over-tall child View pushed the whole scene below the terminal viewport
+	// and the top border scrolled away.
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(color)).
 		Padding(0, 1).
 		Width(w - 2).
-		Height(h - 2)
+		Height(h - 2).
+		MaxWidth(w).
+		MaxHeight(h)
 }
 
 func (m Model) renderHelp() string {
