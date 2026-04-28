@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -131,10 +132,14 @@ func run() (err error) {
 	var caf *caffeinate.Manager
 	if !o.noCaffeinate {
 		c, cerr := caffeinate.Start()
-		if cerr != nil {
+		switch {
+		case cerr == nil:
+			caf = c
+		case errors.Is(cerr, caffeinate.ErrUnsupported):
+			fmt.Fprintf(os.Stderr, "[sleeper] %v; running as animated CLI only\n", cerr)
+		default:
 			return fmt.Errorf("caffeinate: %w", cerr)
 		}
-		caf = c
 	}
 	defer func() {
 		if caf != nil {

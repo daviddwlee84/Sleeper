@@ -1,16 +1,18 @@
 # sleeper
 
-A "look busy" TUI for macOS. Plays a believable fake-coding session on your
-screen so you can step away without your laptop locking, your status bouncing
-to "away," or your screen filling with screensaver fish.
+A "look busy" TUI for macOS and Linux. Plays a believable fake-coding session
+on your screen so you can step away without your laptop locking, your status
+bouncing to "away," or your screen filling with screensaver fish.
 
 > ⚠️ This is a joke / personal-productivity toy. It does not edit, write to,
 > or transmit any of your project files.
 
 ## Features
 
-- **Keeps the screen awake** — runs `caffeinate -dimsu` as a child process and
-  cleans it up on exit (verified by `pgrep`-based unit tests).
+- **Keeps the screen awake** — runs `caffeinate -dims` (macOS) or
+  `systemd-inhibit … cat` (Linux) as a child process and cleans it up on exit
+  (verified by `pgrep`-based unit tests). On platforms / sandboxes where
+  neither is available, sleeper degrades gracefully to animated-only mode.
 - **Fake vim** — opens real files from a project you point it at, animates a
   cursor, fakes insert-mode keystrokes, switches files. Never persists edits.
 - **Fake shell** — runs a tiny allowlist of *real* read-only commands
@@ -65,6 +67,34 @@ local-only checkout, fall back to `go install ./cmd/sleeper` from the repo.
 > `~/.zshrc`, then `mise use -g go@latest`. mise's own
 > [getting-started guide](https://mise.jdx.dev/getting-started.html) has
 > the full per-shell setup.
+
+### Linux / Ubuntu
+
+`go install` works the same way. The keep-awake path uses `systemd-inhibit`,
+which ships with systemd — no extra package needed on Ubuntu, Debian, Fedora,
+Arch, RHEL, or any other systemd distro. Confirm with:
+
+```bash
+which systemd-inhibit   # /usr/bin/systemd-inhibit on Ubuntu
+```
+
+If `systemd-inhibit` is missing (non-systemd distros, minimal containers, WSL1)
+sleeper logs `no sleep inhibitor available on this platform; running as
+animated CLI only` and the TUI continues without holding any lock.
+
+> ⚠️ **GNOME / Ubuntu desktop caveat.** `systemd-inhibit` blocks logind's
+> idle/sleep pipeline (so `systemctl suspend` and lid-close are inhibited),
+> but GNOME runs its own screen-lock idle timer via `org.gnome.ScreenSaver`
+> independently. Your screen may still blank/lock at the *Settings → Privacy
+> → Screen Lock* delay. Workaround:
+>
+> ```bash
+> gsettings set org.gnome.desktop.screensaver lock-enabled false
+> gsettings set org.gnome.desktop.session idle-delay 0
+> ```
+>
+> See [`pitfalls/linux-systemd-inhibit-screensaver-gap.md`](pitfalls/linux-systemd-inhibit-screensaver-gap.md)
+> for the full story.
 
 ## Usage
 
@@ -131,8 +161,10 @@ internal/
 go test ./...
 ```
 
-`caffeinate_test.go` actually starts and stops `caffeinate`, so it'll fail on
-non-macOS systems.
+`caffeinate_test.go` (`//go:build darwin`) starts and stops `caffeinate` and
+runs only on macOS. `caffeinate_linux_test.go` (`//go:build linux`) does the
+equivalent for `systemd-inhibit` and skips itself if the binary is missing
+(keeps non-systemd / minimal-container CI green).
 
 <!-- project-knowledge-harness:readme-roadmap -->
 <!-- Snippet for project's README.md, placed near other meta sections like

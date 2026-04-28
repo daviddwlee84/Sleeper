@@ -32,8 +32,9 @@ Worth doing, no rush.
 Someday / nice-to-have.
 
 - [ ] **[L] Smarter fake-edit placement (tree-sitter, not LSP)** — Current vim 'o' insertion uses end-of-line heuristic + isCleanEnd. Tree-sitter could give AST-aware insertion points (after a stmt, inside a fn body) without LSP's per-language server overhead. Defer until heuristic visibly fails.
-- [ ] **[M] `goreleaser` + GitHub Actions release workflow** — Right now `go install` is the only distribution. Add `.goreleaser.yaml` + `.github/workflows/release.yml` to publish darwin/{amd64,arm64} tarballs on tag. Stays optional — most users will install via `go install`.
+- [ ] **[M] `goreleaser` + GitHub Actions release workflow** — Right now `go install` is the only distribution. Add `.goreleaser.yaml` + `.github/workflows/release.yml` to publish darwin/{amd64,arm64} + linux/{amd64,arm64} tarballs on tag. Stays optional — most users will install via `go install`.
 - [ ] **[S] Per-language insert phrases — fill out the gaps** — `insertBank` covers go/python/ts/js/rust + default. Add java/kotlin/swift/c/cpp/ruby/php phrases when a real user complains the AI looks bored.
+- [ ] **[M] GNOME/KDE screensaver D-Bus inhibitor** — `systemd-inhibit` blocks logind suspend but doesn't silence gnome-shell's own screen-lock idle timer (`org.gnome.ScreenSaver`). Either add a `godbus/dbus` dep or shell out to `gnome-session-inhibit`/`dbus-send` per DE. Defer until a real Ubuntu-desktop user reports the gap; for now the `gsettings lock-enabled false` workaround documented in `pitfalls/linux-systemd-inhibit-screensaver-gap.md` is good enough.
 
 ## P?
 
@@ -51,6 +52,7 @@ scripts/promote-todo.sh --title "<substring>" --summary "<one-line shipped summa
 
 This moves the entry here using the dated `Done` syntax and re-validates.
 
+- ✅ [2026-04-28] [P1/M] Linux / Ubuntu support — `systemd-inhibit … cat` keep-awake under `//go:build linux`, build-tagged darwin/linux/other split of `internal/caffeinate`, `ErrUnsupported` soft-fallback to animated-only mode for sandboxes (Docker without `/run/systemd`, WSL1, BSDs, Windows). GNOME screen-lock gap documented as a pitfall + P3 follow-up.
 - ✅ [2026-04-28] [P1/M] Round-2 fakevim fixes — tab-expanded loadFile + vim-`o` style insert + pane MaxWidth/MaxHeight cap; top border no longer eaten and inserts land after clean-end lines with matched indent.
 - ✅ [2026-04-28] [P1/L] RAM-bomb fix — switched `randomSeed` from `os.ReadFile("/dev/urandom")` to `crypto/rand.Read`, plus mem cap, color profile pin, caffeinate flag fix, signal hard-fallback; 5 pitfalls documented.
 - ✅ [2026-04-28] [P1/L] Initial sleeper build — Bubble Tea TUI with caffeinate keep-awake, fakevim/fakeshell/fakeai panes, `$EDITOR` handover, panic key.
