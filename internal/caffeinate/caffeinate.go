@@ -12,12 +12,15 @@ type Manager struct {
 	pgid int
 }
 
-// Start spawns `caffeinate -dimsu` in its own process group so we can clean
+// Start spawns `caffeinate -dims` in its own process group so we can clean
 // up the whole tree. -d prevents display sleep, -i prevents idle sleep,
-// -m prevents disk sleep, -s prevents system sleep on AC, -u declares user
-// activity (resets the idle timer).
+// -m prevents disk sleep, -s prevents system sleep on AC.
+//
+// We deliberately omit -u: per caffeinate(8), -u defaults to a 5-second
+// timeout when no -t is supplied, which would silently exit our child. The
+// other four flags are assertion-based and live as long as the process.
 func Start() (*Manager, error) {
-	cmd := exec.Command("caffeinate", "-dimsu")
+	cmd := exec.Command("caffeinate", "-dims")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start caffeinate: %w", err)

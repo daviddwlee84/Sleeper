@@ -28,7 +28,10 @@ type Scanner struct {
 	rng   *rand.Rand
 }
 
-const maxFileSize int64 = 200 * 1024
+// maxFileSize bounds the per-file content we'll load + chroma-highlight.
+// 64 KB is generous for source code (a 1000-line file at avg 64 chars/line)
+// and keeps the highlighter's per-render cost predictable.
+const maxFileSize int64 = 64 * 1024
 
 // fnames or globs we never want to fake-display because they often hold secrets.
 var privacyDeny = []string{

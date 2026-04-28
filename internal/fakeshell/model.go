@@ -133,9 +133,10 @@ func (m *Model) appendBlock(label, out string, err error) {
 }
 
 func (m *Model) refreshViewport() {
-	// keep last ~400 lines to bound memory
-	if len(m.history) > 400 {
-		m.history = m.history[len(m.history)-400:]
+	// keep last ~80 lines to bound viewport work and memory
+	const maxHistory = 80
+	if len(m.history) > maxHistory {
+		m.history = m.history[len(m.history)-maxHistory:]
 	}
 	m.vp.SetContent(strings.Join(m.history, "\n"))
 	m.vp.GotoBottom()

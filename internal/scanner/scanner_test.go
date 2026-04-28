@@ -88,7 +88,7 @@ func TestBinaryRejected(t *testing.T) {
 
 func TestSizeLimit(t *testing.T) {
 	dir := t.TempDir()
-	big := strings.Repeat("// hello\n", 30000) // ~270KB > 200KB
+	big := strings.Repeat("// hello\n", 10000) // ~90KB > 64KB
 	if err := os.WriteFile(filepath.Join(dir, "big.go"), []byte(big), 0o600); err != nil {
 		t.Fatal(err)
 	}

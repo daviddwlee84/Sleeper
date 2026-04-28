@@ -54,7 +54,25 @@ func Run(cwd string, c SafeCmd) (string, error) {
 		"TERM=dumb",
 	}
 	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return capLines(string(out), 60), err
+}
+
+// capLines truncates output to at most maxLines lines so an over-eager
+// `find` or `git log` doesn't dump thousands of lines into the viewport.
+func capLines(s string, maxLines int) string {
+	if maxLines <= 0 {
+		return s
+	}
+	count := 0
+	for i, r := range s {
+		if r == '\n' {
+			count++
+			if count >= maxLines {
+				return s[:i] + "\n... (truncated)"
+			}
+		}
+	}
+	return s
 }
 
 // inAllowlist verifies by exact pointer-or-value identity that the SafeCmd
