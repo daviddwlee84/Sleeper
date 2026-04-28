@@ -3,6 +3,8 @@ package scanner
 import (
 	"bufio"
 	"bytes"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io/fs"
 	"math/rand/v2"
@@ -106,13 +108,18 @@ func New(root string, seed uint64) (*Scanner, error) {
 	}, nil
 }
 
+// randomSeed returns 8 bytes of entropy as a uint64.
+//
+// CRITICAL: do NOT use os.ReadFile("/dev/urandom") here. /dev/urandom is an
+// endless stream — ReadFile keeps growing its buffer until process OOM. Use
+// crypto/rand.Read which reads exactly the requested length.
 func randomSeed() uint64 {
 	var b [8]byte
-	_, _ = os.ReadFile("/dev/urandom") // best effort, unused
-	for i := range b {
-		b[i] = byte(os.Getpid() >> uint(i))
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		// Fall back to PID + time mix if crypto/rand somehow fails.
+		return uint64(os.Getpid())*0x9e3779b97f4a7c15 ^ uint64(os.Getppid())
 	}
-	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24
+	return binary.LittleEndian.Uint64(b[:])
 }
 
 // Files returns a snapshot of the discovered files.
