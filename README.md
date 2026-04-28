@@ -26,6 +26,8 @@ to "away," or your screen filling with screensaver fish.
 
 ## Install
 
+### `go install` (default)
+
 ```bash
 go install github.com/daviddwlee84/sleeper/cmd/sleeper@latest
 ```
@@ -35,6 +37,34 @@ Or from a clone:
 ```bash
 go install ./cmd/sleeper
 ```
+
+The binary lands in `$GOPATH/bin` (typically `~/go/bin`). If `which sleeper`
+returns nothing afterwards, that directory isn't on your `PATH`:
+
+```bash
+echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zshrc && exec zsh
+```
+
+### Via [`mise`](https://mise.jdx.dev) (optional)
+
+If you already manage Go with mise and want sleeper to live alongside it
+(no extra `PATH` tweak), use the `go:` backend — mise will install + shim it
+into its own bin path:
+
+```bash
+mise use -g "go:github.com/daviddwlee84/sleeper/cmd/sleeper@latest"
+sleeper --help    # resolves via ~/.local/share/mise/shims/sleeper
+```
+
+Upgrade later with `mise upgrade sleeper`. This requires the module to be
+fetchable by `go install` (i.e. pushed to GitHub with a tag); for a
+local-only checkout, fall back to `go install ./cmd/sleeper` from the repo.
+
+> Heads-up: if `which go` returns nothing on a mise host, mise's shell
+> activation isn't installed. Add `eval "$(mise activate zsh)"` to your
+> `~/.zshrc`, then `mise use -g go@latest`. mise's own
+> [getting-started guide](https://mise.jdx.dev/getting-started.html) has
+> the full per-shell setup.
 
 ## Usage
 
