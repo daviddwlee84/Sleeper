@@ -4251,3 +4251,465 @@ docker run --rm -v "$PWD:/src" -w /src golang:1.25 \
 3. 真有人在 Ubuntu 上裝 sleeper 而出問題的時候,他們會跟你 report,那時候再用真 VM debug 比較划算
 
 如果還是想做一輪 cheap Docker check 圖個心安,我可以幫你跑那個一行的 `docker run` 命令 — 要嗎?
+
+---
+
+_**User (2026-04-28 10:16:38Z)**_
+
+[Image #1] 不過目前我在一臺Ubuntu Server上測試了一下 用 `go install github.com/daviddwlee84/sleeper/cmd/sleeper@latest` 的方式安裝
+結果發現完全沒有預期的TUI畫面 此外整體RAM佔用200MB+ 感覺不是很尋常 看看能不能猜出什麼問題 或是最好讓我在server上執行Claude session debug？
+
+_**User (2026-04-28 10:16:38Z)**_
+
+[Image: source: /Users/daviddwlee84/.claude/image-cache/091521ae-5fca-4dc4-a640-1478af4ee51c/1.png]
+
+---
+
+_**Agent (claude-opus-4-7 2026-04-28 10:17:50Z)**_
+
+_**Agent (claude-opus-4-7 2026-04-28 10:18:13Z)**_
+
+從截圖能看到不少有用線索:
+
+## 觀察到的關鍵資訊
+
+| 訊號 | 數值 |
+|---|---|
+| sleeper 進程狀態 | **Sleeping** (block on syscall,沒卡 CPU) |
+| Memory | **210 MiB** — 剛好頂住預設 `--mem-limit 256` 的天花板,所以一直在做 aggressive GC |
+| Threads | **84** — 因為這台是 EPYC 7763 64-core,Go runtime 預設 `GOMAXPROCS=64` 把 thread pool 開很大 |
+| 啟動參數 | 純 `sleeper`,沒帶 `--project` |
+| 終端 | 左邊 tmux pane **超窄**(看起來只有 20-30 chars 寬) |
+
+## 最有嫌疑的根因(按可能性排序)
+
+### 1. `--project` 預設是 `cwd` → 在 `~` 裡跑等於掃整個 $HOME(主嫌)
+
+`cmd/sleeper/main.go:39`:
+```go
+flag.StringVar(&o.project, "project", cwd, ...)
+```
+
+而 `scanner.New(...)` 是 **同步呼叫**,跑在 TUI `prog.Run()` 之前。在 64-core server 從 `~/` 啟動,scanner 會去 walk:
+- `~/go/` (一堆下載的 module 原始碼)
+- `~/.cache/`, `~/.local/share/`, `~/snap/`
+- 各種 hidden dir 的小檔案
+
+所以 TUI 根本還沒畫第一幀,就卡在 scanner 階段 → 看起來像 **沒畫面**。
+RAM 衝到 210 MB 也是 scanner 暴吃記憶體加上 GOMAXPROCS=64 的 runtime overhead。
+
+### 2. tmux pane 太窄 → 即使 TUI 畫了也看不出來
+左邊那欄真的太窄,vim+shell 雙 pane 佈局塞不進去,lipgloss 可能 render 出空白或被截斷的東西。
+
+### 3. 64-core 的 GOMAXPROCS overhead
+84 threads 在 64-core box 上不算離譜,但對一個 toy TUI 完全是浪費 — 應該強制 `GOMAXPROCS=2~4`。
+
+## 不用 Claude 進 server,先試這幾招
+
+最快驗證根因的順序:
+
+```bash
+# 1) 先確認 systemd-inhibit 真的被拉起來了 — 也順便驗證 Linux feature
+systemd-inhibit --list | grep sleeper
+
+# 2) 把 project 指到一個小 repo,把 GOMAXPROCS 卡死,把 tmux pane 拉寬
+GOMAXPROCS=4 sleeper --project ~/research --scene vim --debug-log /tmp/sleeper.log
+
+# 3) 邊跑邊看 memstats — 應該能看到 heap 從掃 project 那一刻爆衝
+tail -f /tmp/sleeper.log
+```
+
+如果 `--project ~/research --scene vim` 配上夠寬的 pane 就動起來了,那就坐實了 #1。
+
+## 要不要讓我上 server debug?
+
+**建議:** 先你自己用上面三條指令試 5 分鐘。
+
+- 如果跑得動 → 我加幾個防呆 patch 就夠(預設 GOMAXPROCS cap、不允許 cwd 是 `$HOME` 之類)
+- 如果還是黑的 → **直接讓我上 server** 比較快,因為要在那台真機上:
+  - 跑 `strace -p $(pgrep sleeper)` 看它卡在哪個 syscall
+  - 看 `/tmp/sleeper.log` 裡 heap/sys/numGC 的時序
+  - 試 `TERM=xterm-256color` vs `screen-256color` 在 tmux 裡的差別
+  - 真的跑 `caffeinate_linux_test.go` 確認 systemd-inhibit happy path
+
+要我上 server 的話,在那台機開個 `claude` session 把這個 commit 拉下來,把 debug 跑出的 log + screenshot 貼進新 session 就行,或是把 SSH 開給我也可以。
+
+回報結果,我們再決定要不要加 patch(memory/scanner 可能都需要動一下)。
+
+---
+
+_**User (2026-04-28 10:22:22Z)**_
+
+我首先試着排除 (1) 看起來確實是掃描太多(也許可以多一個提示或是max scan timeout 說Project太大 之類的)
+
+然後遇到 (可能沒有成功判斷OS?)
+```
+ldw in 🌐 jingle-207 in SyntheticSnapshot on  master [$!?] via  v3.10.12 (syntheticsnapshot) via  research
+❯ sleeper
+sleeper: caffeinate: start caffeinate: exec: "caffeinate": executable file not found in $PATH
+
+```
+
+```
+ldw in 🌐 jingle-207 in SyntheticSnapshot on  master [$!?] via  v3.10.12 (syntheticsnapshot) via  research
+❯ sleeper -v
+flag provided but not defined: -v
+Usage of sleeper:
+  -ai-style string
+        AI conversation style: debug|feature|refactor|mixed (default "mixed")
+  -debug-log string
+        If set, write per-second memstats to this file
+  -editor string
+        Editor for handover (default $EDITOR) (default "nvim")
+  -mem-limit int
+        Hard process memory cap (MB) — safety net against runaway allocations (default 256)
+  -no-caffeinate
+        Do not start caffeinate (debug)
+  -no-tui
+        Skip TUI; just hold caffeinate until SIGINT (debug)
+  -project string
+        Path to the real project to fake-edit (default "/home/ldw/SyntheticSnapshot")
+  -scene string
+        Initial scene: vim|shell|vim+shell|vim+ai (default "vim+shell")
+  -seed int
+        Deterministic RNG seed (0 = random)
+  -tick duration
+        Base animation tick (default 150ms)
+
+```
+
+或許打一下版本 確保我沒有不小心還是舊版？
+
+---
+
+_**Agent (claude-opus-4-7 2026-04-28 10:23:28Z)**_
+
+_**Agent (claude-opus-4-7 2026-04-28 10:23:32Z)**_
+
+兩個重點:
+
+1. **錯誤訊息洩底了** — `start caffeinate: exec: "caffeinate"...` 這個訊息出自舊版的 `caffeinate.go`(新版根本不會在 Linux 上找 `caffeinate`,會找 `systemd-inhibit`)。這代表你裝的是 **舊版**。
+2. **OS 偵測沒壞** — Go build tags 是編譯期決定的,不是 runtime 偵測,沒有「沒成功判斷 OS」這種可能。
+
+來加 `-version` flag 確認版本。
+
+_**Agent (claude-opus-4-7 2026-04-28 10:23:33Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./cmd/sleeper/main.go`
+
+```text
+1	package main
+2	
+3	import (
+4		"errors"
+5		"flag"
+6		"fmt"
+7		"log"
+8		"os"
+9		"os/signal"
+10		"runtime"
+11		"runtime/debug"
+12		"syscall"
+13		"time"
+14	
+15		tea "github.com/charmbracelet/bubbletea"
+16		"github.com/charmbracelet/lipgloss"
+17		"github.com/muesli/termenv"
+18	
+19		"github.com/daviddwlee84/sleeper/internal/caffeinate"
+20		"github.com/daviddwlee84/sleeper/internal/scanner"
+21		"github.com/daviddwlee84/sleeper/internal/scene"
+22	)
+23	
+24	type opts struct {
+25		project      string
+26		scene        string
+27		tickDur      time.Duration
+28		noCaffeinate bool
+29		noTUI        bool
+30		editor       string
+31		seed         int64
+32		aiStyle      string
+33		memLimitMB   int
+34		debugLog     string
+35	}
+36	
+37	func parseFlags() opts {
+38		cwd, _ := os.Getwd()
+39		o := opts{}
+40		flag.StringVar(&o.project, "project", cwd, "Path to the real project to fake-edit")
+41		flag.StringVar(&o.scene, "scene", "vim+shell", "Initial scene: vim|shell|vim+shell|vim+ai")
+42		flag.DurationVar(&o.tickDur, "tick", 150*time.Millisecond, "Base animation tick")
+43		flag.BoolVar(&o.noCaffeinate, "no-caffeinate", false, "Do not start caffeinate (debug)")
+44		flag.BoolVar(&o.noTUI, "no-tui", false, "Skip TUI; just hold caffeinate until SIGINT (debug)")
+45		flag.StringVar(&o.editor, "editor", os.Getenv("EDITOR"), "Editor for handover (default $EDITOR)")
+46		flag.Int64Var(&o.seed, "seed", 0, "Deterministic RNG seed (0 = random)")
+47		flag.StringVar(&o.aiStyle, "ai-style", "mixed", "AI conversation style: debug|feature|refactor|mixed")
+48		flag.IntVar(&o.memLimitMB, "mem-limit", 256, "Hard process memory cap (MB) — safety net against runaway allocations")
+49		flag.StringVar(&o.debugLog, "debug-log", "", "If set, write per-second memstats to this file")
+50		flag.Parse()
+51		return o
+52	}
+53	
+54	func parseLayout(s string) scene.Layout {
+55		switch s {
+56		case "vim":
+57			return scene.LayoutVimOnly
+58		case "shell":
+59			return scene.LayoutShellOnly
+60		case "vim+shell":
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:23:51Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file /Volumes/Data/Program/tries/2026-04-28-sleep-helper/cmd/sleeper/main.go has been updated successfully.
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:23:55Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file /Volumes/Data/Program/tries/2026-04-28-sleep-helper/cmd/sleeper/main.go has been updated successfully.
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:24:03Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Build + smoke-test -version flag
+
+`go build ./... 2>&1 && go run ./cmd/sleeper -version 2>&1; echo ---; go run ./cmd/sleeper -v 2>&1`
+
+```text
+sleeper (devel)
+  go:     go1.25.7
+  module: github.com/daviddwlee84/sleeper
+---
+sleeper (devel)
+  go:     go1.25.7
+  module: github.com/daviddwlee84/sleeper
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:24:08Z)**_
+
+_**Agent (claude-opus-4-7 2026-04-28 10:24:10Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Install locally and check -version embeds VCS info
+
+`go install ./cmd/sleeper 2>&1 && "$(go env GOPATH)/bin/sleeper" -version 2>&1`
+
+```text
+sleeper v0.0.0-20260428101128-742a963b67d9+dirty
+  commit: 742a963b67d9 (dirty)  2026-04-28T10:11:28Z
+  go:     go1.25.7
+  module: github.com/daviddwlee84/sleeper
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:24:23Z)**_
+
+_**Agent (claude-opus-4-7 2026-04-28 10:24:23Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Recent commits
+
+`git log --oneline -5`
+
+```text
+742a963 Add Linux/Ubuntu support: systemd-inhibit keep-awake + soft fallback
+46fd675 README: document `~/go/bin` PATH gotcha + mise install path
+a7349ce Round-2 fakevim fixes + record RAM-bomb pitfalls + project knowledge harness
+5860683 Fix root-cause RAM bomb: don't ReadFile /dev/urandom
+696ef00 Fix RAM/system-stall on launch: caffeinate flags, mem cap, color profile pin
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:24:45Z)**_
+
+_**Agent (claude-opus-4-7 2026-04-28 10:24:46Z)**_
+
+`-version` flag works; pseudo-version 跟 commit SHA 都嵌進去了。順手把 user 提的「scan-too-large 警告」也記成 P2 follow-up,然後 commit。
+
+_**Agent (claude-opus-4-7 2026-04-28 10:24:57Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file /Volumes/Data/Program/tries/2026-04-28-sleep-helper/TODO.md has been updated successfully.
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:25:01Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Stage -version flag + TODO update
+
+`git add cmd/sleeper/main.go TODO.md && git status`
+
+```text
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   TODO.md
+	modified:   cmd/sleeper/main.go
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .specstory/history/2026-04-28_09-46-15Z-linux-feature-os-ubuntu.md
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:25:10Z)**_
+
+_**Agent (claude-opus-4-7 2026-04-28 10:25:11Z)**_
+
+Origin 已經是 `742a963`(Linux 支援已 push 上去),但你裝的還是舊版,是 Go module proxy 的 cache 在搗蛋。先 commit version flag:
+
+_**Agent (claude-opus-4-7 2026-04-28 10:25:17Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Commit -version flag + TODO entry
+
+```bash
+git add ".specstory/history/2026-04-28_09-46-15Z-linux-feature-os-ubuntu.md" && git commit -m "$(cat <<'EOF'
+Add -version / -v flag with VCS metadata
+
+Prints module pseudo-version, commit SHA (12-char), commit time, dirty
+flag, Go version, and module path — all read from
+runtime/debug.ReadBuildInfo, so no ldflags needed. Useful for confirming
+whether a `go install ...@latest` actually picked up a recent commit
+(the module proxy can serve a cached "latest" for ~30 minutes).
+
+Also tracks a P2 follow-up in TODO.md: the project scanner runs
+synchronously before TUI launch, so passing `--project ~` walks the
+whole home tree and starves the first frame for tens of seconds.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+```text
+[main 03dcbf4] Add -version / -v flag with VCS metadata
+ 3 files changed, 369 insertions(+)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:25:20Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Confirm commit + branch state
+
+`git log --oneline -3; echo ---; git status`
+
+```text
+03dcbf4 Add -version / -v flag with VCS metadata
+742a963 Add Linux/Ubuntu support: systemd-inhibit keep-awake + soft fallback
+46fd675 README: document `~/go/bin` PATH gotcha + mise install path
+---
+On branch main
+Your branch is ahead of 'origin/main' by 1 commit.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .specstory/history/2026-04-28_09-46-15Z-linux-feature-os-ubuntu.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-7 2026-04-28 10:25:34Z)**_
+
+_**Agent (claude-opus-4-7 2026-04-28 10:25:51Z)**_
+
+`03dcbf4` 已 commit 本地(`-version` flag)。現在 origin 1 commit behind。
+
+## 解釋你看到的 OLD 版錯誤
+
+`exec: "caffeinate": executable file not found in $PATH` 是 **`46fd675` 那版的程式碼路徑**(那時候還沒有 build tag,Linux 上也直接 exec `caffeinate`)。
+
+OS 偵測沒壞 — Go build tags 是 **編譯期** 決定的。會跑到 `caffeinate` 路徑,只能是因為你在編譯的根本是舊 source。
+
+可能性:
+- (A) `go install ...@latest` 時你還沒 push `742a963`
+- (B) push 了但 [proxy.golang.org](https://proxy.golang.org) 還在快取舊版(典型 5–30 分鐘 TTL)
+
+兩個情況都用同樣方式解。
+
+## 建議的後續步驟(需要你做)
+
+**1. 本機 push**(我沒幫你 push,要不要 push 是你決定)
+
+```bash
+git push origin main
+```
+
+push 後 origin/main 會在 `03dcbf4`(包含 Linux 支援 + `-version` flag)。
+
+**2. Server 上強制抓新版**(繞 proxy cache)
+
+```bash
+GOPROXY=direct go install github.com/daviddwlee84/sleeper/cmd/sleeper@latest
+```
+
+或者直接指定 commit SHA(最保險):
+
+```bash
+go install github.com/daviddwlee84/sleeper/cmd/sleeper@03dcbf4
+```
+
+**3. 確認版本**
+
+```bash
+sleeper -version
+```
+
+預期會看到類似:
+```
+sleeper v0.0.0-20260428...-03dcbf4xxxxxx
+  commit: 03dcbf4xxxxx  2026-04-28T...
+  go:     go1.25.7
+  module: github.com/daviddwlee84/sleeper
+```
+
+如果 commit 開頭是 `03dcbf4` 或 `742a963`,就是新版,新版在 Linux 走 `systemd-inhibit`,不會去找 `caffeinate`。
+
+**4. 然後實際跑(避開掃 $HOME 的坑)**
+
+```bash
+sleeper --project ~/research/SyntheticSnapshot --scene vim
+```
+
+或更小一點的 repo,先把 TUI 跑起來再說。
+
+## 關於 scan-too-large 警告
+
+你建議的 「max scan timeout / 提示 project 太大」我已經寫進 `TODO.md` 的 P2:
+
+> scanner.New 是 sync 跑在 TUI launch 之前,加 5s wall-clock 或 50k files cap,超過就 stderr 印 `[sleeper] project too large; pass --project <smaller-dir>`
+
+這是真實 bug 不是 nice-to-have,但因為跟 OS 支援的事是兩條獨立的線,我先記著。push 完那次 install 確定動了之後,要不要我接著做這個?

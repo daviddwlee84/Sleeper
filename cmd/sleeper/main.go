@@ -32,6 +32,7 @@ type opts struct {
 	aiStyle      string
 	memLimitMB   int
 	debugLog     string
+	version      bool
 }
 
 func parseFlags() opts {
@@ -47,8 +48,43 @@ func parseFlags() opts {
 	flag.StringVar(&o.aiStyle, "ai-style", "mixed", "AI conversation style: debug|feature|refactor|mixed")
 	flag.IntVar(&o.memLimitMB, "mem-limit", 256, "Hard process memory cap (MB) — safety net against runaway allocations")
 	flag.StringVar(&o.debugLog, "debug-log", "", "If set, write per-second memstats to this file")
+	flag.BoolVar(&o.version, "version", false, "Print version and exit")
+	flag.BoolVar(&o.version, "v", false, "Print version and exit (alias)")
 	flag.Parse()
 	return o
+}
+
+// printVersion writes module + commit metadata embedded by `go install` to
+// stdout. Useful for confirming whether a remote install picked up a recent
+// commit (the module proxy can serve a cached `@latest` for ~30 minutes).
+func printVersion() {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		fmt.Println("sleeper (build info unavailable)")
+		return
+	}
+	var rev, when, dirty string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+		case "vcs.time":
+			when = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = " (dirty)"
+			}
+		}
+	}
+	fmt.Printf("sleeper %s\n", info.Main.Version)
+	if rev != "" {
+		fmt.Printf("  commit: %s%s  %s\n", rev, dirty, when)
+	}
+	fmt.Printf("  go:     %s\n", info.GoVersion)
+	fmt.Printf("  module: %s\n", info.Main.Path)
 }
 
 func parseLayout(s string) scene.Layout {
@@ -115,6 +151,11 @@ func startMemLogger(path string, stop <-chan struct{}) error {
 
 func run() (err error) {
 	o := parseFlags()
+
+	if o.version {
+		printVersion()
+		return nil
+	}
 
 	installMemorySafetyNet(o.memLimitMB)
 

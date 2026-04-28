@@ -26,6 +26,7 @@ Likely next batch — items you'd reach for if you sat down to work today.
 Worth doing, no rush.
 
 - [ ] **[S] Integration test: SIGTERM cleanup invariant** — Add a Go test that spawns sleeper as a subprocess (with `--no-tui`), sends SIGTERM, asserts `pgrep caffeinate` is empty within 2 s. Pairs with the hard-fallback deadline in main; without the test, that path can regress unnoticed. See `pitfalls/bubbletea-quit-deadlock.md`.
+- [ ] **[S] Bound the project scan: timeout + file-count cap + warning** — Today `scanner.New(--project)` runs synchronously before TUI launch, and `--project` defaults to `cwd`. Running sleeper from `$HOME` (or any huge tree) walks every reachable file before drawing the first frame — the user sees a black screen for 30+ s and 200+ MB RSS. Add a hard cap (e.g. 5 s wall-clock OR 50k files, whichever first) that aborts the walk and prints `[sleeper] project too large; pass --project <smaller-dir>` to stderr. Considered minor: also default `--project` to refuse `$HOME` / `/`.
 
 ## P3
 
