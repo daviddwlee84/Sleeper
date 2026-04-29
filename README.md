@@ -7,6 +7,12 @@ bouncing to "away," or your screen filling with screensaver fish.
 > ⚠️ This is a joke / personal-productivity toy. It does not edit, write to,
 > or transmit any of your project files.
 
+![sleeper demo](docs/demo.gif)
+
+<sub>Recording produced by [`docs/demo.tape`](docs/demo.tape) — see
+[`docs/demo-recording.md`](docs/demo-recording.md) for the tooling rationale
+and how to re-record after UI changes.</sub>
+
 ## Features
 
 - **Keeps the screen awake** — runs `caffeinate -dims` (macOS) or
